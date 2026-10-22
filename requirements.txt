@@ -1,0 +1,17 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
+alembic>=1.13
+pydantic-settings>=2.4
+
+# Firebase ID token doğrulama (servis hesabı gerekmez)
+google-auth>=2.30
+requests>=2.31
+cachecontrol>=0.14
+
+# test
+pytest>=8.0
+httpx>=0.27
+cryptography>=42
+boto3
