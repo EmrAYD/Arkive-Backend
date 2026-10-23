@@ -63,7 +63,6 @@ def make_token(key_pem, **overrides):
         "iat": now - 60,
         "exp": now + 3600,
         "email": "ali@example.com",
-        "name": "Ali Veli",
     }
     payload.update(overrides)
     payload = {k: v for k, v in payload.items() if v is not None}
@@ -80,7 +79,7 @@ def test_valid_token_logs_in_and_creates_user(client, keys):
 
     assert r.status_code == 200
     assert r.json()["email"] == "ali@example.com"
-    assert r.json()["name"] == "Ali Veli"
+    assert "name" not in r.json()
 
 
 def test_garbage_token_is_401(client):

@@ -24,7 +24,7 @@ def db(session_factory):
 
 
 def make_user(db, uid="u1"):
-    user = User(firebase_uid=uid, email=f"{uid}@example.com", name=uid)
+    user = User(firebase_uid=uid, email=f"{uid}@example.com")
     db.add(user)
     db.commit()
     return user

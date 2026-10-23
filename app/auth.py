@@ -27,7 +27,7 @@ _CLOCK_SKEW_SECONDS = 10
 
 
 def verify_firebase_id_token(token: str) -> dict:
-    """Firebase ID token'ını doğrular ve {"uid", "email", "name"} döner.
+    """Firebase ID token'ını doğrular ve {"uid", "email"} döner.
 
     Firebase'in "üçüncü taraf JWT kütüphanesiyle doğrulama" kurallarını uygular:
     imza (Google sertifikaları), exp/iat, aud == proje kimliği, iss, sub, auth_time.
@@ -59,7 +59,6 @@ def verify_firebase_id_token(token: str) -> dict:
     return {
         "uid": sub,
         "email": payload.get("email"),
-        "name": payload.get("name"),
     }
 
 
@@ -101,12 +100,11 @@ def get_current_user(
     """Token'daki Firebase kullanıcısının kaydını döner; ilk girişte oluşturur (upsert)."""
     uid = claims["uid"]
     email = claims.get("email") or None
-    name = claims.get("name") or None
 
     user = db.scalar(select(User).where(User.firebase_uid == uid))
 
     if user is None:
-        user = User(firebase_uid=uid, email=email, name=name)
+        user = User(firebase_uid=uid, email=email)
         db.add(user)
         try:
             db.commit()
@@ -122,9 +120,6 @@ def get_current_user(
     changed = False
     if email and user.email != email:
         user.email = email
-        changed = True
-    if name and user.name != name:
-        user.name = name
         changed = True
     if changed:
         db.commit()

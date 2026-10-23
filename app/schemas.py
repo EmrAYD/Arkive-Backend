@@ -12,7 +12,6 @@ class UserOut(BaseModel):
 
     id: uuid.UUID
     email: str | None
-    name: str | None
     created_at: datetime
     used_storage: int
 

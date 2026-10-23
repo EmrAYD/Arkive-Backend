@@ -16,14 +16,14 @@ def test_me_without_token_is_401(client):
 
 
 def test_first_login_creates_user(client, login_as, session_factory):
-    login_as(uid="uid-1", email="ali@example.com", name="Ali Veli")
+    login_as(uid="uid-1", email="ali@example.com")
 
     r = client.get("/me")
 
     assert r.status_code == 200
     body = r.json()
     assert body["email"] == "ali@example.com"
-    assert body["name"] == "Ali Veli"
+    assert "name" not in body
     assert body["used_storage"] == 0
     assert "id" in body and "created_at" in body
     with session_factory() as db:
@@ -31,7 +31,7 @@ def test_first_login_creates_user(client, login_as, session_factory):
 
 
 def test_second_call_does_not_duplicate(client, login_as, session_factory):
-    login_as(uid="uid-1", email="ali@example.com", name="Ali Veli")
+    login_as(uid="uid-1", email="ali@example.com")
     first = client.get("/me").json()
     second = client.get("/me").json()
 
@@ -40,16 +40,16 @@ def test_second_call_does_not_duplicate(client, login_as, session_factory):
         assert db.scalar(select(func.count()).select_from(User)) == 1
 
 
-def test_profile_updates_but_missing_claims_do_not_erase(client, login_as):
-    login_as(uid="uid-1", email="ali@example.com", name="Ali Veli")
+def test_email_updates_but_missing_claim_does_not_erase(client, login_as):
+    login_as(uid="uid-1", email="ali@example.com")
     client.get("/me")
 
-    login_as(uid="uid-1", email="ali@example.com", name="Ali Yılmaz")
-    assert client.get("/me").json()["name"] == "Ali Yılmaz"
+    login_as(uid="uid-1", email="ali.yeni@example.com")
+    assert client.get("/me").json()["email"] == "ali.yeni@example.com"
 
-    # E-posta/şifre ile girişte token'da name olmayabilir: eski ad silinmemeli.
-    login_as(uid="uid-1", email="ali@example.com")
-    assert client.get("/me").json()["name"] == "Ali Yılmaz"
+    # Token'da e-posta olmayabilir: eski e-posta silinmemeli.
+    login_as(uid="uid-1")
+    assert client.get("/me").json()["email"] == "ali.yeni@example.com"
 
 
 def test_different_uids_are_different_users(client, login_as, session_factory):
@@ -63,10 +63,10 @@ def test_different_uids_are_different_users(client, login_as, session_factory):
         assert db.scalar(select(func.count()).select_from(User)) == 2
 
 
-def test_user_without_email_or_name(client, login_as):
+def test_user_without_email(client, login_as):
     login_as(uid="uid-3")
     body = client.get("/me").json()
-    assert body["email"] is None and body["name"] is None
+    assert body["email"] is None
 
 
 # --- Plan ve depolama sınırı -------------------------------------------------
