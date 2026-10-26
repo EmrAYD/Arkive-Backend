@@ -1,4 +1,5 @@
 import re
+import unicodedata
 import uuid
 from datetime import datetime
 
@@ -69,6 +70,29 @@ def _clean_color(value: str | None) -> str | None:
     return color.upper()
 
 
+_EMOJI_MAX_CHARS = 16  # birleşik emojiler (aile, bayrak, ten rengi…) birkaç karakterden oluşur
+
+
+def _clean_emoji(value: str | None) -> str | None:
+    """Klasör emojisini doğrular. Boş metin ya da null "emoji yok" demektir.
+
+    Emoji listesini sunucu tutmaz (yeni emojiler çıkar); yalnızca makul bir emoji gibi görünmesini şart koşar:
+    en çok 16 karakter, boşluk/denetim karakteri yok, yalnızca ASCII değil (düz harf/rakam emoji sayılmaz).
+    """
+    if value is None:
+        return None
+    emoji = value.strip()
+    if not emoji:
+        return None
+    if len(emoji) > _EMOJI_MAX_CHARS:
+        raise ValueError(f"Emoji en fazla {_EMOJI_MAX_CHARS} karakter olabilir")
+    if any(unicodedata.category(ch) in ("Cc", "Zs", "Zl", "Zp") for ch in emoji):
+        raise ValueError("Emoji boşluk ya da denetim karakteri içeremez")
+    if emoji.isascii():
+        raise ValueError("Geçerli bir emoji olmalı")
+    return emoji
+
+
 class FolderCreate(BaseModel):
     """İstemcinin klasör oluştururken gönderdiği JSON."""
 
@@ -78,16 +102,19 @@ class FolderCreate(BaseModel):
     # Yalnızca kök klasörler için anlamlı. Alt klasör konumunu üst klasöründen devralır.
     location: FolderLocation | None = None
     color: str | None = None
+    emoji: str | None = None
     favorite: bool = False
 
     _check_name = field_validator("name")(_clean_folder_name)
     _check_color = field_validator("color")(_clean_color)
+    _check_emoji = field_validator("emoji")(_clean_emoji)
 
 
 class FolderUpdate(BaseModel):
     """Klasörü güncellemek için (ad, renk, favori, üst klasör). Gönderilmeyen alan değişmez.
 
-    `color: null` göndermek rengi siler; `color` hiç gönderilmezse renk olduğu gibi kalır.
+    `color: null` göndermek rengi siler; `color` hiç gönderilmezse renk olduğu gibi kalır. `emoji` de aynı
+    şekilde çalışır (`emoji: null` ya da boş metin emojiyi siler).
     Aynı şekilde `parent_id: null` klasörü ana sayfanın en üstüne taşır, `parent_id` hiç
     gönderilmezse klasör olduğu yerde kalır. Bu ayrımı model_fields_set (istemcinin gerçekten
     gönderdiği alanlar) sağlar.
@@ -95,11 +122,13 @@ class FolderUpdate(BaseModel):
 
     name: str | None = None
     color: str | None = None
+    emoji: str | None = None
     favorite: bool | None = None
     parent_id: uuid.UUID | None = None
 
     _check_name = field_validator("name")(_clean_folder_name)
     _check_color = field_validator("color")(_clean_color)
+    _check_emoji = field_validator("emoji")(_clean_emoji)
 
     @model_validator(mode="after")
     def _at_least_one_field(self):
@@ -123,6 +152,7 @@ class FolderOut(BaseModel):
     name: str
     location: FolderLocation
     color: str | None
+    emoji: str | None
     favorite: bool
     created_at: datetime
 
@@ -241,6 +271,7 @@ class TrashFolderOut(BaseModel):
     id: uuid.UUID
     name: str
     color: str | None
+    emoji: str | None
     file_count: int  # klasörle birlikte çöpe atılan dosya sayısı
     size: int  # bunların toplam boyutu (bayt)
     deleted_at: datetime

@@ -209,6 +209,60 @@ def test_invalid_color_is_422(client, login_as):
         assert _create(client, "X", color=bad).status_code == 422, bad
 
 
+# --- Emoji ---------------------------------------------------------------------
+
+
+def test_emoji_defaults_to_none_and_is_saved_on_create(client, login_as):
+    login_as(uid="u1")
+    assert _create(client, "Düz").json()["emoji"] is None
+
+    f = _create(client, "Fotoğraflar", emoji="📷", color="#1E88E5").json()
+    assert f["emoji"] == "📷" and f["color"] == "#1E88E5"  # emoji ve renk birlikte kullanılabilir
+
+    # Birleşik emojiler (ZWJ dizisi, bayrak, tuş takımı) birkaç karakterden oluşur ve olduğu gibi saklanır.
+    for combo in ["👨\u200d👩\u200d👧", "🇹🇷", "1\ufe0f\u20e3", "❤\ufe0f"]:
+        assert _create(client, f"E-{combo}", emoji=combo).json()["emoji"] == combo
+
+
+def test_invalid_emoji_is_422(client, login_as):
+    login_as(uid="u1")
+    for bad in ["a", "abc", "12", "📷 📁", "📷\n📁", "x" * 17, "😀" * 17]:
+        assert _create(client, "X", emoji=bad).status_code == 422, repr(bad)
+
+
+def test_blank_emoji_means_no_emoji(client, login_as):
+    login_as(uid="u1")
+    assert _create(client, "A", emoji="").json()["emoji"] is None
+    assert _create(client, "B", emoji="   ").json()["emoji"] is None
+
+
+def test_patch_emoji_set_change_clear_and_leave(client, login_as):
+    login_as(uid="u1")
+    f = _create(client, "A", color="#112233").json()
+
+    r = client.patch(f"/folders/{f['id']}", json={"emoji": "📁"}).json()
+    assert r["emoji"] == "📁" and r["color"] == "#112233"
+
+    # Başka bir alan değişince emoji olduğu gibi kalır.
+    r = client.patch(f"/folders/{f['id']}", json={"favorite": True}).json()
+    assert r["emoji"] == "📁"
+
+    r = client.patch(f"/folders/{f['id']}", json={"emoji": "🎵"}).json()
+    assert r["emoji"] == "🎵"
+
+    r = client.patch(f"/folders/{f['id']}", json={"emoji": None}).json()  # emojiyi sil
+    assert r["emoji"] is None and r["color"] == "#112233"
+
+    assert client.patch(f"/folders/{f['id']}", json={"emoji": "abc"}).status_code == 422
+
+
+def test_emoji_is_returned_in_listings(client, login_as):
+    login_as(uid="u1")
+    f = _create(client, "A", emoji="🎓").json()
+    listed = client.get("/folders").json()
+    assert [x["emoji"] for x in listed if x["id"] == f["id"]] == ["🎓"]
+
+
 def test_patch_only_changes_sent_fields(client, login_as):
     login_as(uid="u1")
     f = _create(client, "A", color="#112233").json()

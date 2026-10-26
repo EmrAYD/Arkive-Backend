@@ -96,6 +96,7 @@ def create_folder(
         name=body.name,
         location=location,
         color=body.color,
+        emoji=body.emoji,
         favorite=body.favorite,
     )
     db.add(folder)
@@ -206,6 +207,8 @@ def update_folder(
         folder.parent_id = new_parent_id
     if "color" in sent:
         folder.color = body.color
+    if "emoji" in sent:
+        folder.emoji = body.emoji
     if "favorite" in sent:
         folder.favorite = body.favorite
 

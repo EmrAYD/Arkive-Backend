@@ -100,6 +100,8 @@ class Folder(Base):
 
     # ER diyagramındaki Folders.Color ve Folders.Favorite
     color: Mapped[str | None] = mapped_column(String(20))
+    # Klasör simgesinin ortasında gösterilen emoji (tek bir emoji; birleşik emojiler birkaç karakterden oluşur).
+    emoji: Mapped[str | None] = mapped_column(String(64))
     favorite: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false()
     )

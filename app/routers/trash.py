@@ -41,6 +41,7 @@ def _folder_out(db: Session, f: Folder, days: int, now) -> TrashFolderOut:
         id=f.id,
         name=f.name,
         color=f.color,
+        emoji=f.emoji,
         file_count=count,
         size=size,
         deleted_at=trash_logic.as_utc(f.deleted_at),

@@ -404,3 +404,20 @@ def test_restore_file_without_conflict_keeps_its_name(client, storage, login_as)
     client.delete(f"/files/{f['id']}")
     client.post("/trash/restore", json={"file_ids": [f["id"]]})
     assert [x["name"] for x in client.get("/files").json()] == ["x.txt"]
+
+
+def test_trashed_folder_keeps_emoji_and_restores_it(client, login_as):
+    login_as(uid="u1")
+    top = _folder(client, "Üst", color="#1E88E5", emoji="📚")
+    sub = _folder(client, "Alt", parent_id=top["id"], emoji="✏\ufe0f")
+    client.delete(f"/folders/{top['id']}")
+
+    listed = client.get("/trash").json()["folders"]
+    assert [f["emoji"] for f in listed] == ["📚"]
+    inside = client.get(f"/trash/folders/{top['id']}").json()
+    assert inside["folder"]["emoji"] == "📚"
+    assert [f["emoji"] for f in inside["folders"]] == ["✏\ufe0f"]
+
+    client.post("/trash/restore", json={"folder_ids": [top["id"]]})
+    restored = {f["id"]: f for f in client.get("/folders").json()}
+    assert restored[top["id"]]["emoji"] == "📚" and restored[top["id"]]["color"] == "#1E88E5"
