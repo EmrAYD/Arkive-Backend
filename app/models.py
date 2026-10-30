@@ -18,11 +18,12 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     false,
+    exists,
     func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, aliased, column_property, mapped_column
 
 from app.db import Base
 
@@ -167,6 +168,12 @@ class File(Base):
     # Çöp kutusuna atıldığı an; NULL ise dosya normal listelerde görünür. Çöpteki dosya kotadan yer
     # tutmaya devam eder; kalıcı silinince (elle ya da süre dolunca) kullanım düşer.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    # İçeriğin SHA-256 özeti (hex). Yalnızca özetlenebilir türlerde, yükleme tamamlanınca ya da ilk özetlemede hesaplanır.
+    # Aynı içerikle yeniden yüklenen dosya aynı özeti paylaşır: özet dosyaya değil (kullanıcı, içerik) çiftine bağlıdır.
+    content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    # Yapay zekanın ürettiği sonuç dosyası (ör. özet PDF'i) mu? Bu dosyalar "AI Sonuçlarım" sayfasında durur: klasörsüzse
+    # sayfanın en üstünde, aksi halde AI sonuçları klasörlerinin içinde. Normal dosyalar ana sayfada. İkisi birbirine taşınmaz.
+    is_ai_result: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
     __table_args__ = (
         CheckConstraint("size >= 0", name="ck_files_size"),
@@ -258,17 +265,26 @@ class Payment(Base):
 class AIResult(Base):
     """ER diyagramındaki AI-Results tablosu: bir dosya için üretilen yapay zekâ sonucu.
 
-    file_id zorunludur. folder_id, sonucun gösterileceği klasördür (isteğe bağlı).
+    file_id, sonucun üretildiği kaynak dosyadır; kaynak dosya kalıcı silinince boşalır (SET NULL), kayıt ve sonuç dosyası
+    kalır: aynı içerikle (content_hash) yeniden yüklenen dosya hazır özetle gelir. folder_id, sonucun gösterileceği klasördür.
     """
 
     __tablename__ = "ai_results"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    file_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("files.id", ondelete="CASCADE"), index=True
+    file_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("files.id", ondelete="SET NULL"), index=True
     )
+    # Kaynak dosyanın içerik özeti (files.content_hash kopyası). Kaynak silinse de kayıt buradan eşleşir: aynı dosya tekrar
+    # yüklenince yeniden özetlenmez. Sahibi, file_id ya da result_file_id dosyasının kullanıcısıdır.
+    content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     folder_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("folders.id", ondelete="CASCADE"), index=True
+    )
+    # Sonucun dosya olarak kaydedildiği yer (özetlerde "<ad> - özet.pdf"). Bu dosya KALICI silinince (çöp kutusundan da)
+    # satır kendiliğinden silinir ve kaynak dosya yeniden özetlenebilir; çöpteyken özet geçerli sayılır.
+    result_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("files.id", ondelete="CASCADE"), index=True
     )
     status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
     # PostgreSQL'de JSONB, SQLite'ta JSON olarak saklanır.
@@ -282,6 +298,23 @@ class AIResult(Base):
             "status IN ('pending', 'processing', 'done', 'failed')", name="ck_ai_results_status"
         ),
     )
+
+
+# Dosyanın özeti var mı: aynı kullanıcının, aynı içerikli (content_hash) bir dosyası için tamamlanmış (done) bir yapay zeka
+# sonucu var mı. Dosya her listelendiğinde bu bilgi sorguyla birlikte gelir (FileOut.has_summary); içerik özeti henüz
+# hesaplanmamış (content_hash boş) dosyalarda false'tur. Özetler yalnızca ai_results tablosunda saklanır.
+_result_owner = aliased(File)
+File.has_summary = column_property(
+    exists()
+    .where(
+        AIResult.content_hash == File.content_hash,
+        AIResult.status == "done",
+        # Sonucun sahibi: kaynak dosya (silindiyse sonuç dosyası) kimin ise o.
+        _result_owner.id == func.coalesce(AIResult.file_id, AIResult.result_file_id),
+        _result_owner.user_id == File.user_id,
+    )
+    .correlate_except(AIResult, _result_owner)
+)
 
 
 class Share(Base):

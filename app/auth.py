@@ -117,10 +117,7 @@ def get_current_user(
         return user
 
     # Mevcut kullanıcı: token'da değer varsa güncelle, yoksa eskisini silme.
-    changed = False
     if email and user.email != email:
         user.email = email
-        changed = True
-    if changed:
         db.commit()
     return user

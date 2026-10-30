@@ -201,7 +201,7 @@ def test_open_trashed_folder_shows_its_contents(client, storage, login_as):
     login_as(uid="u1")
     top = _folder(client, "Üst", color="#1E88E5")
     sub = _folder(client, "Alt", parent_id=top["id"])
-    a = _upload(client, storage, "a.txt", 100, folder_id=top["id"])
+    _upload(client, storage, "a.txt", 100, folder_id=top["id"])
     b = _upload(client, storage, "b.txt", 200, folder_id=sub["id"])
     client.delete(f"/folders/{top['id']}")
 
@@ -225,7 +225,7 @@ def test_open_trashed_folder_hides_items_trashed_separately(client, storage, log
     login_as(uid="u1")
     top = _folder(client, "Üst")
     early = _upload(client, storage, "once.txt", 10, folder_id=top["id"])
-    late = _upload(client, storage, "sonra.txt", 20, folder_id=top["id"])
+    _upload(client, storage, "sonra.txt", 20, folder_id=top["id"])
     client.delete(f"/files/{early['id']}")
     client.delete(f"/folders/{top['id']}")
     body = client.get(f"/trash/folders/{top['id']}").json()
@@ -409,7 +409,7 @@ def test_restore_file_without_conflict_keeps_its_name(client, storage, login_as)
 def test_trashed_folder_keeps_emoji_and_restores_it(client, login_as):
     login_as(uid="u1")
     top = _folder(client, "Üst", color="#1E88E5", emoji="📚")
-    sub = _folder(client, "Alt", parent_id=top["id"], emoji="✏\ufe0f")
+    _folder(client, "Alt", parent_id=top["id"], emoji="✏\ufe0f")
     client.delete(f"/folders/{top['id']}")
 
     listed = client.get("/trash").json()["folders"]

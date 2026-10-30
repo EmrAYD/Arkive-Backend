@@ -8,6 +8,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.models import FolderLocation
 
 
+def _require_sent(model: BaseModel, **not_null: str) -> None:
+    """Güncelleme gövdelerinin ortak kuralı: en az bir alan gönderilmeli; [not_null] alanlar gönderildiyse null olamaz
+    (alan adı -> hata mesajı). Gönderilen alanları `model_fields_set` verir; böylece "hiç gönderilmedi" ile "null
+    gönderildi" ayrılır."""
+    sent = model.model_fields_set
+    if not sent:
+        raise ValueError("Güncellenecek en az bir alan gönderilmeli")
+    for field, message in not_null.items():
+        if field in sent and getattr(model, field) is None:
+            raise ValueError(message)
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -33,10 +45,7 @@ class MeUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_field(self):
-        if not self.model_fields_set:
-            raise ValueError("Güncellenecek en az bir alan gönderilmeli")
-        if "trash_retention_days" in self.model_fields_set and self.trash_retention_days is None:
-            raise ValueError("trash_retention_days boş (null) olamaz")
+        _require_sent(self, trash_retention_days="trash_retention_days boş (null) olamaz")
         return self
 
 
@@ -47,17 +56,19 @@ class MeUpdate(BaseModel):
 _COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}")
 
 
-def _clean_folder_name(value: str | None) -> str | None:
-    """Klasör adını doğrular. Hata durumunda FastAPI otomatik 422 döner."""
-    if value is None:
-        return None
+def _clean_name(value: str, label: str) -> str:
+    """Klasör/dosya adını doğrular. Hata durumunda FastAPI otomatik 422 döner."""
     name = value.strip()
     if not 1 <= len(name) <= 255:
-        raise ValueError("Klasör adı 1-255 karakter olmalı")
+        raise ValueError(f"{label} 1-255 karakter olmalı")
     # "/" ve "\" yol ayırıcılarıdır; ad içinde olursa ileride dosya yolu oluştururken karışıklık çıkar.
     if "/" in name or "\\" in name:
-        raise ValueError("Klasör adı '/' veya '\\' içeremez")
+        raise ValueError(f"{label} '/' veya '\\' içeremez")
     return name
+
+
+def _clean_folder_name(value: str | None) -> str | None:
+    return None if value is None else _clean_name(value, "Klasör adı")
 
 
 def _clean_color(value: str | None) -> str | None:
@@ -132,13 +143,7 @@ class FolderUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_field(self):
-        sent = self.model_fields_set
-        if not sent:
-            raise ValueError("Güncellenecek en az bir alan gönderilmeli")
-        if "name" in sent and self.name is None:
-            raise ValueError("Klasör adı boş (null) olamaz")
-        if "favorite" in sent and self.favorite is None:
-            raise ValueError("favorite true ya da false olmalı")
+        _require_sent(self, name="Klasör adı boş (null) olamaz", favorite="favorite true ya da false olmalı")
         return self
 
 
@@ -165,12 +170,7 @@ _MIME_RE = re.compile(r"[A-Za-z0-9!#$&^_.+-]{1,127}/[A-Za-z0-9!#$&^_.+-]{1,127}"
 
 
 def _clean_file_name(value: str) -> str:
-    name = value.strip()
-    if not 1 <= len(name) <= 255:
-        raise ValueError("Dosya adı 1-255 karakter olmalı")
-    if "/" in name or "\\" in name:
-        raise ValueError("Dosya adı '/' veya '\\' içeremez")
-    return name
+    return _clean_name(value, "Dosya adı")
 
 
 class FileInitRequest(BaseModel):
@@ -216,18 +216,12 @@ class FileUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_field(self):
-        sent = self.model_fields_set
-        if not sent:
-            raise ValueError("Güncellenecek en az bir alan gönderilmeli")
-        if "name" in sent and self.name is None:
-            raise ValueError("Dosya adı boş (null) olamaz")
-        if "favorite" in sent and self.favorite is None:
-            raise ValueError("favorite true ya da false olmalı")
+        _require_sent(self, name="Dosya adı boş (null) olamaz", favorite="favorite true ya da false olmalı")
         return self
 
 
 class FileOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     id: uuid.UUID
     folder_id: uuid.UUID | None
@@ -237,6 +231,54 @@ class FileOut(BaseModel):
     favorite: bool
     status: str
     created_at: datetime
+    # Dosyanın (ya da aynı içerikli bir kopyasının) yapay zeka özeti var mı. Uygulamada AI düğmesi buna göre dolu görünür.
+    has_summary: bool = False
+    # Dosya "AI Sonuçlarım" sayfasında (yapay zekanın ürettiği bir sonuç). Bu dosyalar özetlenmez. Veritabanında
+    # `files.is_ai_result`; uygulama eski adıyla okuduğu için yanıtta `in_ai_results` olarak döner.
+    in_ai_results: bool = Field(default=False, validation_alias="is_ai_result")
+
+
+class SummaryOut(BaseModel):
+    """Dosyanın yapay zeka özeti. [source]: 'local' (telefonda) ya da 'cloud' (sunucuda üretildi).
+    [truncated]: dosya çok uzun olduğu için yalnızca ilk bölümü özetlendi (yeni üretilen özetlerde)."""
+
+    summary: str
+    source: str
+    model: str | None = None
+    truncated: bool = False
+    # Özetin "<ad> - özet.pdf" dosyası (AI Sonuçlarım); uygulama özet düğmesine basılınca bu dosyanın ön izlemesini açar.
+    result_file_id: uuid.UUID | None = None
+    created_at: datetime
+
+
+class SummarizeIn(BaseModel):
+    """Bulutta özetleme isteği (POST /files/{id}/summary). Gövde isteğe bağlıdır; parola yalnızca parolalı PDF/DOCX
+    içindir, bu istek süresince bellekte kalır, kaydedilmez ve günlüğe yazılmaz."""
+
+    password: str | None = Field(default=None, max_length=256, repr=False)
+    # Özet PDF'inin şablonu (summary_pdf.TEMPLATES kimliği); bilinmiyorsa/boşsa varsayılan kullanılır.
+    template: str | None = Field(default=None, max_length=32)
+
+
+class SummaryIn(BaseModel):
+    """Telefonda üretilen özetin sunucuya kaydı (PUT /files/{id}/summary)."""
+
+    summary: str
+    model: str | None = Field(default=None, max_length=255)
+    template: str | None = Field(default=None, max_length=32)  # bkz. SummarizeIn.template
+    # Telefonun kendi ürettiği özet PDF'i (base64). Geçerliyse sunucu PDF üretmez, bunu olduğu gibi saklar; yoksa ya da
+    # geçersizse özet metninden kendisi üretir. Üst sınır ~5 MB'lık PDF'e denk gelir.
+    pdf_base64: str | None = Field(default=None, max_length=7_000_000, repr=False)
+
+    @field_validator("summary")
+    @classmethod
+    def _clean(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Özet boş olamaz")
+        if len(value) > 20_000:
+            raise ValueError("Özet çok uzun")
+        return value
 
 
 class FileInitResponse(BaseModel):

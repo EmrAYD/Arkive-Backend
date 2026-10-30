@@ -6,6 +6,7 @@ gerçekten orada ve doğru boyutta olduğunu doğrular, (3) gerektiğinde nesney
 """
 import logging
 from functools import lru_cache
+from urllib.parse import quote
 
 import boto3
 from botocore.client import Config
@@ -73,8 +74,6 @@ class Storage:
 
     def presign_get(self, key: str, filename: str, expires: int) -> str:
         """İndirme adresi. Tarayıcı dosyayı 'filename' adıyla kaydetsin diye Content-Disposition eklenir."""
-        from urllib.parse import quote
-
         disposition = f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
         return self._public.generate_presigned_url(
             "get_object",
@@ -95,6 +94,24 @@ class Storage:
                 return None
             raise StorageError(str(e)) from e
         except BotoCoreError as e:
+            raise StorageError(str(e)) from e
+
+    def read_object(self, key: str, max_bytes: int) -> bytes:
+        """Nesnenin içeriğini okur (özetleme için). [max_bytes]'tan büyükse ValueError."""
+        try:
+            body = self._internal.get_object(Bucket=self.bucket, Key=key)["Body"]
+            data = body.read(max_bytes + 1)
+        except (ClientError, BotoCoreError) as e:
+            raise StorageError(str(e)) from e
+        if len(data) > max_bytes:
+            raise ValueError("object too large")
+        return data
+
+    def put_object(self, key: str, data: bytes, content_type: str) -> None:
+        """Küçük bir nesneyi doğrudan yazar (backend'in kendi ürettiği dosyalar: yapay zeka özeti gibi)."""
+        try:
+            self._internal.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type)
+        except (ClientError, BotoCoreError) as e:
             raise StorageError(str(e)) from e
 
     def delete(self, key: str) -> None:

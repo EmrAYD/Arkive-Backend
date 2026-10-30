@@ -62,6 +62,7 @@ class FakeStorage:
 
     def __init__(self):
         self.objects: dict[str, int] = {}
+        self.contents: dict[str, bytes] = {}   # özetleme testleri için nesne içerikleri
         self.deleted: list[str] = []
         self.last_put = None
 
@@ -74,6 +75,16 @@ class FakeStorage:
 
     def object_size(self, key):
         return self.objects.get(key)
+
+    def read_object(self, key, max_bytes):
+        data = self.contents.get(key, b"")  # içerik verilmemiş testlerde boş dosya
+        if len(data) > max_bytes:
+            raise ValueError("object too large")
+        return data
+
+    def put_object(self, key, data, content_type):
+        self.objects[key] = len(data)
+        self.contents[key] = data
 
     def delete(self, key):
         self.objects.pop(key, None)

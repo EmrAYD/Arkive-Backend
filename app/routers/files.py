@@ -1,17 +1,21 @@
+import asyncio
 import logging
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
-from app.models import File, User
+from app.models import AIResult, File, FolderLocation, User
 from app.naming import unique_file_name
 from app.plans import current_plan, max_file_size
+from app import ai_results, summarize
 from app import trash as trash_logic
 from app.routers.folders import get_owned_folder
 from app.schemas import (
@@ -20,8 +24,11 @@ from app.schemas import (
     FileInitResponse,
     FileOut,
     FileUpdate,
+    SummarizeIn,
+    SummaryIn,
+    SummaryOut,
 )
-from app.storage import Storage, get_optional_storage, get_storage
+from app.storage import Storage, StorageError, get_optional_storage, get_storage
 
 router = APIRouter(prefix="/files", tags=["files"])
 log = logging.getLogger(__name__)
@@ -156,8 +163,22 @@ def complete_upload(
             update(User).where(User.id == user.id).values(used_storage=User.used_storage + file.size)
         )
     db.commit()
-    db.refresh(file)
+    _hash_if_summarizable(db, file, storage)
+    db.refresh(file)  # has_summary, içerik özeti belli olduktan sonra yeniden hesaplanır
     return file
+
+
+def _hash_if_summarizable(db: Session, file: File, storage: Storage) -> None:
+    """Özetlenebilir türdeki dosyanın içerik özetini çıkarır: aynı içerikle yeniden yüklenen dosya, daha önce
+    özetlenmiş kopyasının özetini hemen paylaşsın (AI düğmesi dolu gelsin). Başarısız olması yüklemeyi bozmaz."""
+    if file.content_hash is not None or summarize.kind_of(file.name, file.mime_type) is None:
+        return
+    if file.size > settings.summary_max_file_bytes:
+        return
+    try:
+        _read_and_hash(db, file, storage)
+    except (HTTPException, StorageError):
+        log.warning("İçerik özeti çıkarılamadı: %s", file.id)
 
 
 @router.get("", response_model=list[FileOut])
@@ -168,6 +189,11 @@ def list_files(
     favorite: bool = Query(
         default=False,
         description="true ise klasörden bağımsız olarak TÜM favori dosyalar listelenir (folder_id yok sayılır)",
+    ),
+    location: FolderLocation = Query(
+        default=FolderLocation.home,
+        description="Yalnızca klasörsüz (folder_id yok) listelemede anlamlı: home = ana sayfanın en üstü, "
+        "ai_results = AI Sonuçlarım sayfasının en üstü (yapay zekanın ürettiği dosyalar)",
     ),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -182,7 +208,9 @@ def list_files(
         get_owned_folder(db, user, folder_id)  # yoksa / başkasınınsa 404
         query = query.where(File.folder_id == folder_id)
     else:
-        query = query.where(File.folder_id.is_(None))
+        query = query.where(
+            File.folder_id.is_(None), File.is_ai_result.is_(location == FolderLocation.ai_results)
+        )
     return list(db.scalars(query.order_by(func.lower(File.name))))
 
 
@@ -206,10 +234,14 @@ def update_file(
     # Önce doğrula, sonra değiştir: hata verirsek kayıtta yarım değişiklik kalmasın.
     if "folder_id" in sent and body.folder_id is not None:
         folder = get_owned_folder(db, user, body.folder_id)  # yoksa / başkasınınsa 404
-        if folder.location != _UPLOAD_LOCATION:
+        # Normal dosyalar ana sayfa klasörlerine, yapay zeka sonuç dosyaları AI Sonuçlarım klasörlerine taşınır.
+        wanted_location = "ai_results" if file.is_ai_result else _UPLOAD_LOCATION
+        if folder.location != wanted_location:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                "Dosya bu klasöre taşınamaz (AI sonuçları klasörlerine dosya konulamaz)",
+                "Yapay zeka sonuçları yalnızca AI Sonuçlarım klasörlerine taşınabilir"
+                if file.is_ai_result
+                else "Dosya bu klasöre taşınamaz (AI sonuçları klasörlerine dosya konulamaz)",
             )
 
     # Yeni konumda aynı adlı başka dosya varsa ad otomatik "ad (1)", "ad (2)"… olur (hem yeniden adlandırmada
@@ -276,3 +308,193 @@ def download_url(
         url=storage.presign_get(file.storage_key, file.name, settings.download_url_expires_seconds),
         expires_in=settings.download_url_expires_seconds,
     )
+
+
+def _summary_out(row: AIResult) -> SummaryOut:
+    data = row.result or {}
+    return SummaryOut(
+        summary=data.get("summary", ""),
+        source=data.get("source", "cloud"),
+        model=data.get("model"),
+        truncated=bool(data.get("truncated", False)),
+        result_file_id=row.result_file_id,
+        created_at=row.date,
+    )
+
+
+def _summarizable_file(db: Session, user: User, file_id: uuid.UUID) -> File:
+    """Özetlenebilir (hazır, desteklenen türde, çöpte olmayan) kendi dosyası; değilse uygun hata."""
+    file = _get_owned_file(db, user, file_id)
+    if file.status != "ready":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Dosya henüz hazır değil")
+    if file.is_ai_result:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Yapay zeka sonuçları yeniden özetlenemez.")
+    if summarize.kind_of(file.name, file.mime_type) is None:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, summarize.UNSUPPORTED_MESSAGE)
+    if file.size > settings.summary_max_file_bytes:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Dosya özetlenemeyecek kadar büyük.")
+    return file
+
+
+def _cached_summary(
+    db: Session, user: User, file: File, storage: Storage, *, need_llm: bool = False
+) -> tuple[AIResult | None, bytes | None]:
+    """(kayıtlı özet, dosya içeriği): dosyanın ya da aynı içerikli bir kopyasının özeti varsa (özet, None); yoksa
+    (None, özetlenecek içerik). İçerik özeti ilk kez burada hesaplanıyorsa kopyasının özeti de ancak şimdi aranabilir.
+    [need_llm]: bulut yapay zeka yapılandırılmamışsa dosyayı boşuna okumadan 503 verir."""
+    existing = ai_results.find_summary(db, user, file.content_hash)
+    if existing is not None:
+        return existing, None
+    if need_llm and not (settings.llm_base_url and settings.llm_model):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Bulut yapay zeka yapılandırılmamış.")
+    hash_was_known = file.content_hash is not None
+    data = _read_and_hash(db, file, storage)
+    if hash_was_known:
+        return None, data
+    return ai_results.find_summary(db, user, file.content_hash), data
+
+
+def _read_and_hash(db: Session, file: File, storage: Storage) -> bytes:
+    """Dosyanın içeriğini okur ve (henüz yoksa) içerik özetini kaydeder."""
+    try:
+        data = storage.read_object(file.storage_key, settings.summary_max_file_bytes)
+    except ValueError:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Dosya özetlenemeyecek kadar büyük.")
+    if file.content_hash is None:
+        file.content_hash = summarize.content_hash(data)
+        db.commit()
+    return data
+
+
+def _store_summary(
+    db: Session,
+    user: User,
+    file: File,
+    text: str,
+    origin: str,
+    model: str | None,
+    storage: Storage,
+    truncated: bool = False,
+    ai_row: AIResult | None = None,
+    template: str | None = None,
+    pdf: bytes | None = None,
+) -> AIResult:
+    """Özeti `ai_results` tablosuna yazar ve "AI Sonuçlarım" sayfasına PDF dosyası olarak da koyar. [pdf]: telefonun
+    ürettiği hazır PDF (yoksa sunucu üretir)."""
+    result_file = ai_results.save_summary_file(db, user, storage, file, text, template, pdf)
+    return ai_results.finish(
+        db, file, summary=text, origin=origin, model=model, result_file=result_file, truncated=truncated, row=ai_row
+    )
+
+
+@router.get("/{file_id}/summary", response_model=SummaryOut)
+def get_summary(
+    file_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> SummaryOut:
+    """Dosyanın kayıtlı özeti (yoksa 404). Aynı içerikli bir kopyanın özeti de bu dosyanın özetidir."""
+    file = _get_owned_file(db, user, file_id, include_trashed=True)
+    row = ai_results.find_summary(db, user, file.content_hash)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Bu dosyanın özeti yok")
+    return _summary_out(row)
+
+
+def _summary_http_error(e: summarize.SummaryError) -> HTTPException:
+    """Özetleme hatasını HTTP hatasına çevirir. Kodlu hatalarda (parola gerekli/yanlış) `detail` {code, message} olur."""
+    if e.code:
+        return HTTPException(e.status_code, {"code": e.code, "message": e.message})
+    return HTTPException(e.status_code, e.message)
+
+
+@router.post("/{file_id}/summary", response_model=SummaryOut)
+async def summarize_file(
+    file_id: uuid.UUID,
+    request: Request,
+    body: SummarizeIn | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    storage: Storage = Depends(get_storage),
+) -> SummaryOut:
+    """Dosyayı sunucudaki yapay zekayla özetler ve özeti kaydeder. Dosyanın (ya da aynı içerikli bir kopyasının)
+    özeti zaten varsa yeniden üretilmez, kayıtlı özet döner: aynı dosya ikinci kez özetlenemez.
+
+    Uygulama bunu dosya telefonda özetlenemeyecek kadar büyük/uzun olduğunda ya da ayar "Bulut" olduğunda çağırır.
+    Dosya sunucuya yeniden yüklenmez; backend onu doğrudan depolamadan okur.
+
+    Parolalı PDF/DOCX için gövdede `password` verilir; parola dosyayı bellekte açmak için kullanılır, saklanmaz.
+    Parola gerekiyorsa ve yoksa ya da yanlışsa 423 döner (`detail.code`: password_required / password_invalid).
+
+    İstemci bağlantıyı keserse (uygulamada özetleme iptal edilirse) özetleme hemen durur: yeni LLM çağrısı başlatılmaz,
+    süren çağrı kesilir ve model sunucusu üretimi bırakır. Kayıt "başarısız" olur; sonraki istek yeniden özetler.
+    """
+    cancel = threading.Event()
+
+    async def watch_disconnect() -> None:
+        while not cancel.is_set():
+            if await request.is_disconnected():
+                cancel.set()
+                return
+            await asyncio.sleep(0.5)
+
+    watcher = asyncio.create_task(watch_disconnect())
+    try:
+        return await run_in_threadpool(_summarize_file, file_id, body, user, db, storage, cancel)
+    finally:
+        cancel.set()  # iş bitti (ya da düştü): gözcü de dursun
+        watcher.cancel()
+
+
+def _summarize_file(
+    file_id: uuid.UUID, body: SummarizeIn | None, user: User, db: Session, storage: Storage, cancel: threading.Event
+) -> SummaryOut:
+    file = _summarizable_file(db, user, file_id)
+    existing, data = _cached_summary(db, user, file, storage, need_llm=True)
+    if existing is not None:
+        return _summary_out(existing)
+    # Parolalı dosya özetleme kaydı açılmadan çözülür: parola eksik/yanlışsa "başarısız" satırı oluşmaz.
+    try:
+        data = summarize.unlock(data, file.name, file.mime_type, body.password if body else None)
+    except summarize.SummaryError as e:
+        raise _summary_http_error(e)
+    ai_row = ai_results.begin(db, file)  # ai_results: durum "processing"
+    try:
+        extracted = summarize.extract(data, file.name, file.mime_type)
+        with summarize.cancellable(cancel):
+            text = summarize.summarize(extracted)
+    except summarize.SummaryError as e:
+        ai_results.fail(db, ai_row, e.message)
+        raise _summary_http_error(e)
+    except summarize.Cancelled:
+        ai_results.fail(db, ai_row, "Özetleme iptal edildi.")
+        raise HTTPException(499, "Özetleme iptal edildi.")  # istemci gitti; yanıtı okuyan olmaz
+    if extracted.truncated:
+        text += summarize.TRUNCATED_NOTE
+    row = _store_summary(
+        db, user, file, text, "cloud", settings.llm_model, storage, truncated=extracted.truncated, ai_row=ai_row,
+        template=body.template if body else None,
+    )
+    return _summary_out(row)
+
+
+@router.put("/{file_id}/summary", response_model=SummaryOut)
+def save_local_summary(
+    file_id: uuid.UUID,
+    body: SummaryIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    storage: Storage = Depends(get_storage),
+) -> SummaryOut:
+    """Telefonda üretilen özeti kaydeder (özet sunucuya gitmeden önce telefonda yapılmıştır). Dosyanın zaten özeti
+    varsa mevcut özet korunur ve o döner."""
+    file = _summarizable_file(db, user, file_id)
+    existing, _ = _cached_summary(db, user, file, storage)
+    if existing is not None:
+        return _summary_out(existing)
+    ai_row = ai_results.begin(db, file)
+    row = _store_summary(
+        db, user, file, body.summary, "local", body.model, storage, ai_row=ai_row, template=body.template,
+        pdf=ai_results.client_pdf(body.pdf_base64),
+    )
+    return _summary_out(row)

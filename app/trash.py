@@ -19,7 +19,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.orm import Session, aliased
 
-from app.models import File, Folder, User
+from app.models import AIResult, File, Folder, User
 from app.naming import unique_file_name
 from app.storage import Storage, StorageError
 
@@ -287,6 +287,36 @@ def restore(db: Session, user: User, file_ids: list[uuid.UUID], folder_ids: list
 # --- Kalıcı silme ----------------------------------------------------------
 
 
+def _settle_results(db: Session, user: User, doomed: dict) -> None:
+    """Kalıcı silinecek dosyaların yapay zeka sonuç kayıtlarını (ai_results) düzenler.
+
+    - Tamamlanmış özet: aynı içerikli, silinmeyecek başka bir dosya varsa kayıt ona devredilir; yoksa kayıt KALIR
+      (file_id boşalır, FK SET NULL) ki aynı dosya yeniden yüklenince özet hazır gelsin ve özet dosyası sahipsiz kalmasın.
+    - Sahibini taşıyacak sonuç dosyası olmayan ya da yarım kalmış (processing/failed) kayıtlar silinir.
+    """
+    rows = list(db.scalars(select(AIResult).where(AIResult.file_id.in_(list(doomed)))))
+    for row in rows:
+        survivor = None
+        if row.status == "done" and row.content_hash:
+            survivor = db.scalar(
+                select(File.id)
+                .where(
+                    File.user_id == user.id,
+                    File.content_hash == row.content_hash,
+                    File.id.not_in(list(doomed)),
+                )
+                .order_by(File.deleted_at.is_not(None), File.created_at)
+                .limit(1)
+            )
+        if survivor is not None:
+            row.file_id = survivor
+        elif row.status == "done" and row.result_file_id is not None and row.result_file_id not in doomed:
+            continue  # kayıt kalır; file_id veritabanında boşalır
+        else:
+            db.delete(row)
+    db.flush()
+
+
 def hard_delete(
     db: Session,
     user: User,
@@ -329,6 +359,8 @@ def hard_delete(
     freed = sum(f.size for f in files.values() if f.status in ("ready", "deleted"))
     requested = len(folders) + sum(1 for fid in file_ids if fid in files)
 
+    # Silinen dosyanın yapay zeka sonucu (ai_results) düzenlenir: kayıt kalır ya da devredilir (bkz. _settle_results).
+    _settle_results(db, user, files)
     for chunk in _chunks(list(files)):
         db.execute(delete(File).where(File.id.in_(chunk)))
     for chunk in _chunks([f.id for f in folders]):

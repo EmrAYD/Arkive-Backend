@@ -174,18 +174,24 @@ def test_provider_payment_id_unique(db):
 # --- AI sonuçları ------------------------------------------------------------
 
 
-def test_ai_result_requires_file(db):
-    db.add(AIResult(file_id=None))
-    with pytest.raises(IntegrityError):
-        db.commit()
-
-
-def test_ai_result_stores_json_and_cascades_with_file(db):
+def test_ai_result_stores_json_and_survives_its_source_file(db):
     f = make_file(db, make_user(db))
-    db.add(AIResult(file_id=f.id, status="done", result={"etiketler": ["fatura", "2026"]}))
+    db.add(AIResult(file_id=f.id, status="done", content_hash="h1", result={"etiketler": ["fatura", "2026"]}))
     db.commit()
     assert db.query(AIResult).one().result == {"etiketler": ["fatura", "2026"]}
     db.delete(f)
+    db.commit()
+    # Kaynak dosya silinince kayıt kalır, yalnızca file_id boşalır (aynı içerik yeniden yüklenince eşleşsin diye).
+    row = db.query(AIResult).one()
+    assert row.file_id is None and row.content_hash == "h1"
+
+
+def test_ai_result_is_deleted_with_its_result_file(db):
+    user = make_user(db)
+    source, result_file = make_file(db, user), make_file(db, user)
+    db.add(AIResult(file_id=source.id, result_file_id=result_file.id, status="done"))
+    db.commit()
+    db.delete(result_file)
     db.commit()
     assert db.query(AIResult).count() == 0
 

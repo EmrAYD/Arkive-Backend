@@ -28,6 +28,30 @@ class Settings(BaseSettings):
     upload_url_expires_seconds: int = 900
     download_url_expires_seconds: int = 3600
 
+    # --- Bulut yapay zeka özetleme ---
+    # OpenAI uyumlu bir sohbet uç noktası (kendi sunucunuzdaki vLLM, Ollama, llama.cpp vb.). Adres boşsa özetleme ucu
+    # 503 döner; geri kalan uygulama etkilenmez. Örn: http://llm:8000/v1
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_timeout_seconds: int = 120
+    # Uzun belgede parçaların aynı anda LLM'e gönderilecek sayısı. llama-server'ı `-np` ile aynı değerde başlatın
+    # (ör. `-np 4 -c 32768`): üretim bellek hızıyla sınırlı olduğundan birkaç isteği birlikte işlemek toplamı kısaltır.
+    # Sunucunun slotu azsa fazla istekler sırada bekler. 1: sırayla.
+    llm_concurrency: int = 4
+    # Model görsel de okuyabiliyorsa (Qwen3.5 gibi) true: görsel ağırlıklı/taranmış PDF'lerin sayfaları resim olarak
+    # modele gönderilir. Metin-yalnızca bir modelde false yapın; o zaman yazısız PDF 422 döner.
+    llm_vision: bool = True
+    # Özetlenebilen dosya türleri (virgülle): text, pdf, docx. Birini kapatmak için listeden çıkarın (ör. SUMMARY_FILE_KINDS=text).
+    summary_file_kinds: str = "text,pdf,docx"
+    # Bir PDF'ten modele gönderilecek en çok sayfa, istek başına sayfa ve sayfanın çizim ölçeği (1.0 = 72 dpi).
+    vision_max_pages: int = 12
+    vision_pages_per_request: int = 3
+    vision_render_scale: float = 1.4
+    # Özetlenecek dosyanın en büyük boyutu (bayt) ve çıkarılan metnin en çok karakteri (fazlası kesilir).
+    summary_max_file_bytes: int = 25 * 1024 * 1024
+    summary_max_chars: int = 200_000
+
     # Çöp kutusunda süresi dolanları kalıcı silen arka plan görevinin çalışma aralığı (saniye).
     trash_purge_interval_seconds: int = 3600
 
